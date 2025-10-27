@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Imposter Word Game — Host</title>
+<style>
+  :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+  body{max-width:980px;margin:24px auto;padding:18px;background:#f7f7fb;color:#111;border-radius:10px;}
+  h1{margin:0 0 8px;font-size:22px;}
+  .row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;}
+  label{font-size:14px;}
+  input[type=text],select,input[type=number],textarea{padding:8px;border-radius:6px;border:1px solid #d0d2d6;background:white;}
+  button{padding:10px 12px;border-radius:8px;border:0;background:#111;color:white;cursor:pointer;}
+  .links{margin-top:14px;background:white;padding:12px;border-radius:8px;border:1px solid #e0e0e5;}
+  .player-row{display:flex;gap:8px;align-items:center;margin-bottom:8px;}
+  .mono{font-family:monospace;background:#f0f0f6;padding:6px;border-radius:6px;}
+  small.note{display:block;color:#666;margin-top:6px;}
+  .qr{width:90px;height:90px;border-radius:8px;border:1px solid #eee;object-fit:cover}
+  .hint{color:#444;font-weight:600}
+  footer{margin-top:18px;color:#666;font-size:13px}
+  @media(max-width:600px){.row{flex-direction:column}}
+</style>
+</head>
+<body>
+<h1>Imposter — Word Game (Static Web App)</h1>
+<p>Host creates secret links for each player. Regular players get the word; imposters get only the hint.</p>
+
+<div>
+  <div class="row">
+    <label>
+      Number of players
+      <input id="numPlayers" type="number" min="3" max="20" value="6" />
+    </label>
+    <label>
+      Number of imposters
+      <input id="numImposters" type="number" min="1" max="5" value="1" />
+    </label>
+    <label>
+      Preset list
+      <select id="preset">
+        <option value="animals">Animals</option>
+        <option value="foods">Foods</option>
+        <option value="movies">Movies</option>
+        <option value="random">Random</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="row">
+    <label style="flex:1">
+      Or custom word (leave blank to use preset)
+      <input id="customWord" type="text" placeholder="e.g. 'Pineapple'">
+    </label>
+    <label style="flex:1">
+      Custom hint (optional — shown to imposters)
+      <input id="customHint" type="text" placeholder="e.g. 'Tropical, sweet'">
+    </label>
+  </div>
+
+  <div class="row">
+    <button id="createBtn">Create Room & Generate Links</button>
+    <button id="regenBtn" style="background:#777;margin-left:6px">Regenerate Roles</button>
+    <button id="clearBtn" style="background:#c33;margin-left:6px">Clear</button>
+  </div>
+
+  <div id="linksArea" class="links" style="display:none">
+    <strong>Share each player's link (or QR) privately):</strong>
+    <div id="playersList" style="margin-top:10px"></div>
+    <small class="note">Players open their unique link; the host should not open any player's link. Links are encoded in the URL hash and can be copied or scanned.</small>
+  </div>
+</div>
+
+<hr style="margin:18px 0">
+
+<h3>Player View (for testing or if opening a secret link)</h3>
+<p>If you open a link with a token (`#token=...`), this panel shows what a player will see.</p>
+<div id="playerView" class="links" style="display:none"></div>
+
+<footer>
+  Tip: to host, upload this file to any static host (GitHub Pages, Netlify). Or open as a local file.
+</footer>
+
+<script>
+/* --- Preset lists --- */
+const PRESETS = {
+  animals: ["Tiger","Elephant","Kangaroo","Penguin","Dolphin","Giraffe","Panda","Hedgehog","Owl","Cheetah"],
+  foods: ["Pizza","Sushi","Taco","Spaghetti","Burger","Pancake","Chocolate","Dumpling","Salad","Ice cream"],
+  movies: ["Titanic","Inception","Jurassic Park","Toy Story","Gladiator","Matrix","Avatar","Rocky","Casablanca","Frozen"],
+  random: ["Treasure","Festival","Rocket","Island","Library","Cyclone","Lantern","Castle","Midnight","Harbor"]
+};
+
+/* --- Base64-safe encode/decode for unicode --- */
+function encodeText(s){
+  return btoa(encodeURIComponent(s));
+}
+function decodeText(b){
+  try { return decodeURIComponent(atob(b)); } catch(e){ return atob(b); }
+}
+
+/* --- utility --- */
+function randInt(max){ return Math.floor(Math.random()*max); }
+function shuffle(arr){
+  for(let i=arr.length-1;i>0;i--){
+    const j=randInt(i+1);
+    [arr[i],arr[j]]=[arr[j],arr[i]];
+  }
+  return arr;
+}
+
+/* --- Create player tokens embedded in URL hash --- */
+function makeToken(payload){
+  // payload is an object; stringify then base64
+  const str = JSON.stringify(payload);
+  return encodeText(str);
+}
+function parseToken(token){
+  try{
+    const json = decodeText(token);
+    return JSON.parse(json);
+  }catch(e){
+    return null;
+  }
+}
+
+/* --- UI wiring --- */
+const createBtn = document.getElementById('createBtn');
+const regenBtn = document.getElementById('regenBtn');
+const clearBtn = document.getElementById('clearBtn');
+const linksArea = document.getElementById('linksArea');
+const playersList = document.getElementById('playersList');
+const playerView = document.getElementById('playerView');
+
+let lastRoom = null;
+
+function generateRoom(){
+  const numPlayers = Math.max(3, Math.min(20, parseInt(document.getElementById('numPlayers').value||6)));
+  const numImposters = Math.max(1, Math.min(Math.floor(numPlayers/2), parseInt(document.getElementById('numImposters').value||1)));
+  const preset = document.getElementById('preset').value;
+  const customWord = (document.getElementById('customWord').value||"").trim();
+  const customHint = (document.getElementById('customHint').value||"").trim();
+
+  // pick word & hint
+  let word = customWord || PRESETS[preset][randInt(PRESETS[preset].length)];
+  let hint = customHint || makeHintFromWord(word);
+
+  // decide which players are imposters
+  const roles = Array(numPlayers).fill('player');
+  for(let i=0;i<numImposters;i++){
+    roles[i]='imposter';
+  }
+  shuffle(roles);
+
+  // create per-player tokens
+  const tokens = [];
+  for(let i=0;i<numPlayers;i++){
+    const role = roles[i];
+    const payload = {role, hint};
+    if(role === 'player') payload.word = word;
+    // helpful metadata (not secret): index and createdAt (not used for logic)
+    payload.index = i+1;
+    payload.createdAt = new Date().toISOString();
+    const token = makeToken(payload);
+    tokens.push({index:i+1,role,token});
+  }
+
+  // store room state locally (non-persistent across hosts)
+  lastRoom = {tokens,word,hint,createdAt:Date.now()};
+  showLinks(tokens);
+}
+
+function makeHintFromWord(w){
+  // extremely simple hint creator: synonyms-ish by removing a letter or category clue
+  if(!w) return "No hint";
+  const lower = w.toLowerCase();
+  if(lower.length<=4) return "Short word";
+  // if includes space, give category-ish hint
+  if(w.indexOf(' ')>=0) return "Two words";
+  return `Starts with "${w[0].toUpperCase()}" and has ${w.length} letters`;
+}
+
+function showLinks(tokens){
+  playersList.innerHTML = "";
+  const base = location.href.split('#')[0];
+  tokens.forEach(t=>{
+    const url = base + '#token=' + encodeURIComponent(t.token);
+    const div = document.createElement('div');
+    div.className = 'player-row';
+    div.innerHTML = `
+      <div style="width:42px;text-align:center;font-weight:700">P${t.index}</div>
+      <div style="flex:1">
+        <div class="mono" id="link-${t.index}">${url}</div>
+        <small>Role: <strong>${t.role}</strong></small>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+        <button data-copy="${t.index}">Copy</button>
+        <img class="qr" src="https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(url)}" alt="QR">
+      </div>
+    `;
+    playersList.appendChild(div);
+  });
+
+  // add copy handlers
+  playersList.querySelectorAll('button[data-copy]').forEach(btn=>{
+    btn.addEventListener('click', e=>{
+      const idx = btn.getAttribute('data-copy');
+      const sel = document.getElementById('link-'+idx);
+      const txt = sel.textContent;
+      navigator.clipboard?.writeText(txt).then(()=> btn.textContent='Copied',()=> btn.textContent='Copy');
+    });
+  });
+
+  linksArea.style.display = 'block';
+}
+
+createBtn.addEventListener('click', ()=>{
+  generateRoom();
+});
+
+regenBtn.addEventListener('click', ()=>{
+  if(!lastRoom){ alert('Create a room first.'); return; }
+  // regenerate roles with same word/hint and same player count
+  const numPlayers = lastRoom.tokens.length;
+  const numImposters = document.getElementById('numImposters').value || 1;
+  // rebuild roles
+  const roles = Array(numPlayers).fill('player');
+  const nimp = Math.max(1, Math.min(Math.floor(numPlayers/2), parseInt(numImposters)));
+  for(let i=0;i<nimp;i++) roles[i]='imposter';
+  shuffle(roles);
+  const tokens = roles.map((role,idx)=>{
+    const payload = {role, hint:lastRoom.hint};
+    if(role==='player') payload.word = lastRoom.word;
+    payload.index = idx+1;
+    payload.createdAt = new Date().toISOString();
+    return {index:idx+1, role, token: makeToken(payload)};
+  });
+  lastRoom.tokens = tokens;
+  showLinks(tokens);
+});
+
+clearBtn.addEventListener('click', ()=>{
+  lastRoom = null;
+  playersList.innerHTML = "";
+  linksArea.style.display='none';
+});
+
+/* --- Player view decoding from URL hash --- */
+function checkHashForToken(){
+  const h = location.hash || '';
+  if(!h) { playerView.style.display = 'none'; return; }
+  const m = h.match(/token=([^&]+)/);
+  if(!m) { playerView.style.display='none'; return; }
+  const tok = decodeURIComponent(m[1]);
+  const payload = parseToken(tok);
+  if(!payload){ playerView.style.display='none'; return; }
+  renderPlayer(payload);
+}
+
+function renderPlayer(payload){
+  playerView.style.display = 'block';
+  let html = `<div style="padding:12px"><div style="font-size:16px;margin-bottom:8px">Player <strong>P${payload.index||'?'}</strong></div>`;
+  if(payload.role === 'imposter'){
+    html += `<div style="font-size:20px;color:#a33;font-weight:800">YOU ARE THE IMPOSTER</div>`;
+    html += `<p class="hint">Hint: ${payload.hint || 'No hint provided'}</p>`;
+    html += `<p style="margin-top:8px;color:#666">You do <strong>not</strong> know the secret word.</p>`;
+  } else {
+    html += `<div style="font-size:20px;color:#0a6;font-weight:800">You know the WORD</div>`;
+    html += `<p style="font-size:18px;margin:8px 0" class="mono">${payload.word || '—'}</p>`;
+    html += `<p style="color:#666">Hint (for imposters): <span class="hint">${payload.hint || '—'}</span></p>`;
+  }
+  html += `<small style="display:block;margin-top:8px;color:#666">Don't show this screen to other players.</small>`;
+  html += `</div>`;
+  playerView.innerHTML = html;
+}
+
+/* run on load */
+window.addEventListener('hashchange', checkHashForToken);
+checkHashForToken();
+</script>
+</body>
+</html>
